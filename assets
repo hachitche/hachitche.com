@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fighting Game - Enhanced</title>
+  <style>
+    :root{--bg:#1e1e2a;--floor:#2b2b3a}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);font-family:system-ui,Segoe UI,Roboto,Arial;color:#eee;}
+    #game{display:block;margin:18px auto;background:linear-gradient(#2b2b3a 0%, #222 100%);border-radius:8px;}
+    .ui{width:900px;margin:0 auto;display:flex;justify-content:space-between;align-items:center}
+    .panel{display:flex;gap:8px;align-items:center}
+    .hpbar, .enbar{width:200px;height:12px;background:#444;border-radius:6px;overflow:hidden}
+    .hpfill{height:100%;background:linear-gradient(90deg,#ef4444,#f87171)}
+    .enfill{height:100%;background:linear-gradient(90deg,#06b6d4,#0ea5a0)}
+    .btn{background:#333;padding:6px 10px;border-radius:6px;color:#ddd;border:1px solid #444}
+    .center{display:flex;gap:12px;align-items:center;justify-content:center;margin-top:8px}
+    .hint{font-size:13px;color:#bbb}
+    #overlay{position:fixed;left:0;top:0;width:100%;height:100%;display:none;align-items:center;justify-content:center}
+    #overlay .box{background:rgba(0,0,0,0.7);padding:20px;border-radius:8px;text-align:center}
+    .small{font-size:12px;color:#ccc}
+  </style>
+</head>
+<body>
+<div class="ui">
+  <div class="panel">
+    <div>
+      <div class="small">Player 1</div>
+      <div class="hpbar"><div id="hp1" class="hpfill" style="width:100%"></div></div>
+      <div class="enbar"><div id="en1" class="enfill" style="width:0%"></div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="hint">Controls P1: A/D move, W jump, F light, G heavy, E special</div>
+    <div class="hint">Controls P2: ←/→ move, ↑ jump, / light, . heavy, Shift special</div>
+  </div>
+  <div class="panel">
+    <div>
+      <div class="small">Player 2</div>
+      <div class="hpbar"><div id="hp2" class="hpfill" style="width:100%"></div></div>
+      <div class="enbar"><div id="en2" class="enfill" style="width:0%"></div></div>
+    </div>
+  </div>
+</div>
+<canvas id="game" width="900" height="500"></canvas>
+<div class="center">
+  <button id="restart" class="btn">Restart</button>
+  <button id="toggleAI" class="btn">Toggle AI (P2)</button>
+  <div class="hint">Combo = chain light attacks quickly. Heavy pushes back. Special consumes energy.</div>
+</div>
+<div id="overlay"><div class="box"><h2 id="result">Player X Wins</h2><button id="closeOverlay" class="btn">Close</button></div></div>
+<script>
+// Enhanced Fighting Game with jumps, combos, energy, special, sounds, AI toggle
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// audio helper (simple beeps using WebAudio)
+const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+function beep(freq, time=0.08, type='sine', vol=0.15){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.value = vol;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime + time);
+}
+
+function playHit(){beep(180,0.06,'square',0.12)}
+function playPunch(){beep(300,0.04,'sawtooth',0.08)}
+function playSpecial(){beep(560,0.14,'sine',0.2)}
+
+// physics
+const GRAVITY = 0.8;
+const FLOOR_Y = 400;
+
+function createPlayer(x, color, controls){
+  return {
+    x,x0:x,y:FLOOR_Y - 100, w:60, h:100, color, hp:100, energy:0,
+    vx:0, vy:0, facing:1, onGround:true,
+    state:'idle', stateTime:0,
+    combo:0, comboTime:0,
+    cooldowns:{light:0,heavy:0,special:0},
+    controls
+  }
+}
+
+const p1 = createPlayer(140,'#4af',{left:'a', right:'d', jump:'w', light:'f', heavy:'g', special:'e'});
+const p2 = createPlayer(700,'#f44',{left:'ArrowLeft', right:'ArrowRight', jump:'ArrowUp', light:'/', heavy:'.', special:'Shift'});
+let aiEnabled = false;
+
+const keys = {};
+document.addEventListener('keydown', e=>{keys[e.key]=true});
+document.addEventListener('keyup', e=>{keys[e.key]=false});
+
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+
+function applyInputs(p, isAI=false){
+  // movement
+  let left = !!keys[p.controls.left];
+  let right = !!keys[p.controls.right];
+  let jump = !!keys[p.controls.jump];
+  if(isAI){
+    // simple AI: move toward opponent and attack when close
+    const target = (p===p1)?p2:p1;
+    left = p.x > target.x + 30;
+    right = p.x < target.x - 30;
+    // random jump occasionally
+    if(Math.random()<0.01) jump = true;
+    // attack decisions
+    if(Math.abs(p.x - target.x) < 90){
+      keys[p.controls.light] = Math.random()<0.02;
+      keys[p.controls.heavy] = Math.random()<0.01;
+      keys[p.controls.special] = (p.energy>=100 && Math.random()<0.015);
+    }
+  }
+
+  if(left && !right) { p.vx = -4; p.facing = -1; }
+  else if(right && !left) { p.vx = 4; p.facing = 1; }
+  else p.vx = 0;
+
+  // jump
+  if(jump && p.onGround){ p.vy = -14; p.onGround=false; playPunch(); }
+
+  // attacks
+  if(keys[p.controls.light] && p.cooldowns.light<=0){
+    p.state='light'; p.stateTime=8; p.cooldowns.light=12; p.combo++; p.comboTime=30; playPunch();
+  }
+  if(keys[p.controls.heavy] && p.cooldowns.heavy<=0){
+    p.state='heavy'; p.stateTime=18; p.cooldowns.heavy=40; p.combo=0; playHit();
+  }
+  if(keys[p.controls.special] && p.cooldowns.special<=0 && p.energy>=100){
+    p.state='special'; p.stateTime=28; p.cooldowns.special=120; p.energy=0; playSpecial();
+  }
+}
+
+function resolveAttacks(a,b){
+  // if a is attacking, check hit
+  if(a.state==='light' && a.stateTime>0){
+    const range = 70;
+    if(Math.abs((a.x + a.w/2) - (b.x + b.w/2)) < range){
+      // damage depends on combo
+      const dmg = 3 + Math.floor(a.combo/3);
+      b.hp = clamp(b.hp - dmg, 0, 100);
+      b.vx += (a.facing)*2; // knockback
+      playHit();
+    }
+  }
+  if(a.state==='heavy' && a.stateTime>0){
+    const range = 90;
+    if(Math.abs((a.x + a.w/2) - (b.x + b.w/2)) < range){
+      const dmg = 10;
+      b.hp = clamp(b.hp - dmg, 0, 100);
+      b.vx += (a.facing)*4;
+      playHit();
+    }
+  }
+  if(a.state==='special' && a.stateTime>0){
+    // special: area effect
+    const range = 160;
+    if(Math.abs((a.x + a.w/2) - (b.x + b.w/2)) < range){
+      const dmg = 14;
+      b.hp = clamp(b.hp - dmg, 0, 100);
+      b.vx += (a.facing)*6; b.vy -= 6;
+      playSpecial();
+    }
+  }
+}
+
+function updatePlayer(p, dt){
+  // cooldowns
+  for(const k in p.cooldowns) if(p.cooldowns[k]>0) p.cooldowns[k]-=1;
+  // combo timeout
+  if(p.comboTime>0) p.comboTime--;
+  else p.combo=0;
+
+  // apply physics
+  p.x += p.vx;
+  p.vy += GRAVITY; p.y += p.vy;
+  if(p.y >= FLOOR_Y - p.h){ p.y = FLOOR_Y - p.h; p.vy = 0; p.onGround=true; }
+
+  // friction
+  p.vx *= 0.9;
+
+  // keep in bounds
+  p.x = clamp(p.x, 20, W - p.w - 20);
+
+  // state time
+  if(p.stateTime>0) p.stateTime--;
+  else p.state='idle';
+
+  // regen energy slowly
+  if(p.energy < 100) p.energy += 0.15;
+}
+
+function drawPlayer(p){
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(p.x+6, FLOOR_Y - 8, p.w, 8);
+  // body
+  ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.w, p.h);
+  // face (direction)
+  ctx.fillStyle = '#222'; ctx.fillRect(p.x + (p.facing===1? p.w-10:2), p.y+10, 8, 8);
+
+  // attack indicator
+  if(p.state==='light'){
+    ctx.fillStyle = 'gold';
+    const ax = p.facing===1? p.x + p.w : p.x - 20;
+    ctx.fillRect(ax, p.y + 40, 20, 12);
+  }
+  if(p.state==='heavy'){
+    ctx.fillStyle = 'orange';
+    const ax = p.facing===1? p.x + p.w : p.x - 28;
+    ctx.fillRect(ax, p.y + 30, 28, 20);
+  }
+  if(p.state==='special'){
+    ctx.fillStyle = 'cyan';
+    ctx.beginPath();
+    ctx.arc(p.x + p.w/2, p.y + p.h/2, 40, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawUI(){
+  document.getElementById('hp1').style.width = p1.hp + '%';
+  document.getElementById('hp2').style.width = p2.hp + '%';
+  document.getElementById('en1').style.width = Math.floor(p1.energy) + '%';
+  document.getElementById('en2').style.width = Math.floor(p2.energy) + '%';
+}
+
+let last = 0;
+function loop(t){
+  const dt = t - last; last = t;
+  ctx.clearRect(0,0,W,H);
+  // background
+  ctx.fillStyle = '#111'; ctx.fillRect(0,0,W,H);
+  // stage
+  ctx.fillStyle = '#2b2b3a'; ctx.fillRect(0,FLOOR_Y,W,H-FLOOR_Y);
+
+  // AI or player inputs
+  applyInputs(p1, false);
+  applyInputs(p2, aiEnabled);
+
+  // resolve attacks (both ways)
+  resolveAttacks(p1,p2);
+  resolveAttacks(p2,p1);
+
+  updatePlayer(p1,dt); updatePlayer(p2,dt);
+
+  drawPlayer(p1); drawPlayer(p2);
+
+  drawUI();
+
+  // check win
+  if(p1.hp<=0 || p2.hp<=0){
+    const winner = p1.hp>p2.hp? 'Player 1' : (p2.hp>p1.hp? 'Player 2' : 'Draw');
+    showResult(winner + ' Wins!');
+    return; // stop loop
+  }
+
+  requestAnimationFrame(loop);
+}
+
+function showResult(text){
+  document.getElementById('result').innerText = text;
+  document.getElementById('overlay').style.display = 'flex';
+}
+
+// controls for buttons
+document.getElementById('restart').addEventListener('click', ()=>{
+  reset(); requestAnimationFrame(loop);
+});
+document.getElementById('toggleAI').addEventListener('click', ()=>{ aiEnabled=!aiEnabled; document.getElementById('toggleAI').innerText = 'Toggle AI (P2): ' + (aiEnabled? 'ON':'OFF'); });
+document.getElementById('closeOverlay').addEventListener('click', ()=>{ document.getElementById('overlay').style.display='none'; reset(); requestAnimationFrame(loop); });
+
+function reset(){
+  p1.x=140; p1.y=FLOOR_Y-100; p1.hp=100; p1.energy=0; p1.vx=0; p1.vy=0; p1.state='idle'; p1.combo=0;
+  p2.x=700; p2.y=FLOOR_Y-100; p2.hp=100; p2.energy=0; p2.vx=0; p2.vy=0; p2.state='idle'; p2.combo=0;
+  document.getElementById('overlay').style.display='none';
+}
+
+// start
+reset(); requestAnimationFrame(loop);
+
+// small helper: clicking canvas resumes audio context on some browsers
+canvas.addEventListener('click', ()=>{ if(audioCtx.state==='suspended') audioCtx.resume(); });
+
+</script>
+</body>
+</html>
